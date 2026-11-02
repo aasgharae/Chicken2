@@ -1,7 +1,7 @@
 {
   "name": "حساب‌یار دامپزشک",
   "short_name": "حساب‌یار",
-  "description": "مدیریت مالی آفلاین مرغداران برای دامپزشک",
+  "description": "مدیریت مالی مرغداری‌ها",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

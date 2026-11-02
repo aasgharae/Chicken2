@@ -1,0 +1,17 @@
+{
+  "name": "حساب‌یار دامپزشک",
+  "short_name": "حساب‌یار",
+  "description": "مدیریت مالی آفلاین مرغداران برای دامپزشک",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d7a5f",
+  "theme_color": "#0d7a5f",
+  "dir": "rtl",
+  "lang": "fa",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

@@ -1,4 +1,4 @@
-const CACHE='hesabyar-v3';
+const CACHE='hesabyar-v4';
 const ASSETS=[
   './','./index.html','./styles.css','./jalali.js','./app.js','./manifest.json','./icon.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js',

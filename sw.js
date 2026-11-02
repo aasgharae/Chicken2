@@ -1,4 +1,4 @@
-const CACHE='hesabyar-v1';
+const CACHE='hesabyar-v2';
 const ASSETS=[
   './','./index.html','./styles.css','./jalali.js','./app.js','./manifest.json','./icon.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js',
@@ -12,11 +12,7 @@ self.addEventListener('install',e=>{
   );
 });
 self.addEventListener('activate',e=>{
-  e.waitUntil(
-    caches.keys()
-      .then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k))))
-      .then(()=>self.clients.claim())
-  );
+  e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));
 });
 self.addEventListener('fetch',e=>{
   if(e.request.method!=='GET')return;

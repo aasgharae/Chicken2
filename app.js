@@ -45,10 +45,6 @@ function computeAgeDays(entryDatesJson){
     return diff>=0?diff:null;
   }catch(e){return null}
 }
-function formatAge(days){
-  if(days===null||days===undefined) return '';
-  return `${faNum(days)} روز`;
-}
 
 /* ===== Storage ===== */
 const IDB='hesabyar-idb',STORE='db';
@@ -87,36 +83,71 @@ async function saveToFile(){if(!sqliteFileHandle||!db)return;try{const w=await s
 
 /* ===== SQLite ===== */
 let SQL,db,saveTimer=null;
-const SCHEMA=`
-PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS farmers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,phone TEXT DEFAULT '',notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS houses(id INTEGER PRIMARY KEY AUTOINCREMENT,farmer_id INTEGER NOT NULL,name TEXT NOT NULL,address TEXT DEFAULT '',capacity INTEGER DEFAULT 0,owner_name TEXT DEFAULT '',tenant_name TEXT DEFAULT '',tariff_type TEXT DEFAULT 'broiler',initial_debt INTEGER DEFAULT 0,placement_date TEXT DEFAULT '',loading_date TEXT DEFAULT '',contract_start TEXT DEFAULT '',contract_end TEXT DEFAULT '',active INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(farmer_id) REFERENCES farmers(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,farmer_id INTEGER NOT NULL,house_id INTEGER,cycle_id INTEGER,type TEXT NOT NULL,amount INTEGER NOT NULL,description TEXT DEFAULT '',jalali_date TEXT NOT NULL,gregorian_date TEXT NOT NULL,for_month TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(farmer_id) REFERENCES farmers(id) ON DELETE CASCADE,FOREIGN KEY(house_id) REFERENCES houses(id) ON DELETE SET NULL);
-CREATE TABLE IF NOT EXISTS cycles(id INTEGER PRIMARY KEY AUTOINCREMENT,house_id INTEGER NOT NULL,entry_dates TEXT DEFAULT '',chick_count INTEGER DEFAULT 0,system_cost INTEGER DEFAULT 0,mortality_count INTEGER DEFAULT 0,diseases TEXT DEFAULT '',mortality_enabled INTEGER DEFAULT 0,vaccine_enabled INTEGER DEFAULT 0,load_start_date TEXT DEFAULT '',load_end_date TEXT DEFAULT '',cycle_end_date TEXT DEFAULT '',active INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(house_id) REFERENCES houses(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS tariff_history(id INTEGER PRIMARY KEY AUTOINCREMENT,tariff_type TEXT NOT NULL,amount INTEGER NOT NULL,effective_from TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
-CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
-CREATE INDEX IF NOT EXISTS idx_tx_farmer ON transactions(farmer_id);
-CREATE INDEX IF NOT EXISTS idx_tx_house ON transactions(house_id);
-CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(gregorian_date);
-CREATE INDEX IF NOT EXISTS idx_tx_month ON transactions(house_id,type,for_month);
-`;
+
+// تابع اصلاح خودکار دیتابیس‌های قدیمی
+function getTableColumns(tableName){
+  try {
+    const res = db.exec(`PRAGMA table_info(${tableName})`);
+    if(!res.length) return [];
+    return res[0].values.map(v => v[1]); 
+  } catch(e) { return []; }
+}
+
+function migrateSchema(){
+  try{
+    const cols = getTableColumns('transactions');
+    if(cols.length > 0){
+      if(!cols.includes('house_id')) db.run("ALTER TABLE transactions ADD COLUMN house_id INTEGER");
+      if(!cols.includes('cycle_id')) db.run("ALTER TABLE transactions ADD COLUMN cycle_id INTEGER");
+      if(!cols.includes('for_month')) db.run("ALTER TABLE transactions ADD COLUMN for_month TEXT DEFAULT ''");
+    }
+    const houseCols = getTableColumns('houses');
+    if(houseCols.length > 0 && !houseCols.includes('initial_debt')){
+      db.run("ALTER TABLE houses ADD COLUMN initial_debt INTEGER DEFAULT 0");
+    }
+  }catch(e){ console.warn('Migration warning:', e); }
+}
 
 async function initDB(){
   SQL=await initSqlJs({locateFile:f=>`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/${f}`});
   let bytes=null;
   if(storageMode==='file') bytes=await loadFromFile();
   if(!bytes||!bytes.byteLength) bytes=await idbLoad();
+  
   db=bytes&&bytes.byteLength?new SQL.Database(new Uint8Array(bytes)):new SQL.Database();
-  db.run(SCHEMA);
+  
+  // 1. ساخت جداول (بدون ایندکس‌های وابسته به ستون‌های جدید)
+  db.run(`
+    PRAGMA foreign_keys=ON;
+    CREATE TABLE IF NOT EXISTS farmers(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,phone TEXT DEFAULT '',notes TEXT DEFAULT '',created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS houses(id INTEGER PRIMARY KEY AUTOINCREMENT,farmer_id INTEGER NOT NULL,name TEXT NOT NULL,address TEXT DEFAULT '',capacity INTEGER DEFAULT 0,owner_name TEXT DEFAULT '',tenant_name TEXT DEFAULT '',tariff_type TEXT DEFAULT 'broiler',initial_debt INTEGER DEFAULT 0,placement_date TEXT DEFAULT '',loading_date TEXT DEFAULT '',contract_start TEXT DEFAULT '',contract_end TEXT DEFAULT '',active INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(farmer_id) REFERENCES farmers(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,farmer_id INTEGER NOT NULL,type TEXT NOT NULL,amount INTEGER NOT NULL,description TEXT DEFAULT '',jalali_date TEXT NOT NULL,gregorian_date TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(farmer_id) REFERENCES farmers(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS cycles(id INTEGER PRIMARY KEY AUTOINCREMENT,house_id INTEGER NOT NULL,entry_dates TEXT DEFAULT '',chick_count INTEGER DEFAULT 0,system_cost INTEGER DEFAULT 0,mortality_count INTEGER DEFAULT 0,diseases TEXT DEFAULT '',mortality_enabled INTEGER DEFAULT 0,vaccine_enabled INTEGER DEFAULT 0,load_start_date TEXT DEFAULT '',load_end_date TEXT DEFAULT '',cycle_end_date TEXT DEFAULT '',active INTEGER DEFAULT 1,created_at TEXT DEFAULT (datetime('now')),FOREIGN KEY(house_id) REFERENCES houses(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS tariff_history(id INTEGER PRIMARY KEY AUTOINCREMENT,tariff_type TEXT NOT NULL,amount INTEGER NOT NULL,effective_from TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
+  `);
+  
+  // 2. آپدیت دیتابیس قدیمی
+  migrateSchema();
+  
+  // 3. ساخت ایندکس‌ها (حالا که مطمئنیم ستون‌ها وجود دارند)
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_tx_farmer ON transactions(farmer_id);
+    CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(gregorian_date);
+  `);
+  try { db.run(`CREATE INDEX IF NOT EXISTS idx_tx_house ON transactions(house_id);`); } catch(e){}
+  try { db.run(`CREATE INDEX IF NOT EXISTS idx_tx_month ON transactions(house_id,type,for_month);`); } catch(e){}
+
   await persistNow();
 }
+
 async function persistNow(){if(!db)return;try{await idbSave(db.export())}catch(e){}if(storageMode==='file')await saveToFile()}
 function persist(){if(!db)return;clearTimeout(saveTimer);saveTimer=setTimeout(()=>persistNow().catch(()=>{}),200)}
 function qAll(sql,p=[]){const s=db.prepare(sql);try{s.bind(p);const o=[];while(s.step())o.push(s.getAsObject());return o}finally{s.free()}}
 function qOne(sql,p=[]){return qAll(sql,p)[0]||null}
 function run(sql,p=[]){db.run(sql,p);persist()}
 
-/* ===== Tariff helpers ===== */
+/* ===== Tariff & Charge ===== */
 function getTariffForMonth(type,mKey){
   const r=qOne('SELECT amount FROM tariff_history WHERE tariff_type=? AND effective_from<=? ORDER BY effective_from DESC LIMIT 1',[type,mKey]);
   return r?r.amount:0;
@@ -125,8 +156,6 @@ function getCurrentTariff(type){
   const r=qOne('SELECT amount FROM tariff_history WHERE tariff_type=? ORDER BY effective_from DESC LIMIT 1',[type]);
   return r?r.amount:0;
 }
-
-/* ===== Monthly charge generator ===== */
 function generateMonthlyCharges(){
   const today=todayJalali();
   const nowKey=monthKey(today.jy,today.jm);
@@ -164,7 +193,7 @@ function generateMonthlyCharges(){
   if(created>0){persist();toast(`${faNum(created)} شارژ ماهانه جدید ثبت شد`)}
 }
 
-/* ===== Balance helpers ===== */
+/* ===== Balance Helpers ===== */
 function farmerBalance(farmerId){
   const charge=qOne(`SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE farmer_id=? AND type IN ('initial_debt','manual_debt','system_cost','monthly_charge')`,[farmerId]).s;
   const pay=qOne(`SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE farmer_id=? AND type='payment'`,[farmerId]).s;
@@ -358,7 +387,7 @@ function txRow(t){
   </div>`;
 }
 
-/* ===== Modal ===== */
+/* ===== Modal & Date Picker ===== */
 function openModal(html){
   $('#modalRoot').innerHTML=`<div class="modal-backdrop" data-backdrop><div class="modal">${html}</div></div>`;
   $$('[data-close]').forEach(b=>b.addEventListener('click',closeModal));
@@ -367,13 +396,21 @@ function openModal(html){
 }
 function closeModal(){$('#modalRoot').innerHTML=''}
 
-/* ===== Date picker ===== */
-function pickDate(current,callback){
+function pickDate(current, callback){
   let init=parseJalali(current)||todayJalali();
   let{jy,jm,jd}=init;
+  const overlay=document.createElement('div');
+  overlay.className='modal-backdrop';
+  overlay.style.zIndex='150';
+  overlay.innerHTML=`<div class="modal"><h2>انتخاب تاریخ</h2><div class="cal-body"></div>
+    <div class="form-actions single" style="margin-top:16px">
+      <button type="button" class="btn" data-cancel>انصراف</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  const body=overlay.querySelector('.cal-body');
+  const closeP=()=>overlay.remove();
   const render=()=>{
     const days=jalaliMonthLength(jy,jm);
-    const first=g2d(d2g(j2d(jy,jm,1)).gy,d2g(j2d(jy,jm,1)).gm,d2g(j2d(jy,jm,1)).gd);
     const g=d2g(j2d(jy,jm,1));
     const jsDay=new Date(g.gy,g.gm-1,g.gd).getDay();
     const pStart=(jsDay+1)%7;
@@ -385,34 +422,29 @@ function pickDate(current,callback){
       const isToday=(jy===t.jy&&jm===t.jm&&d===t.jd);
       cells+=`<button type="button" class="cal-day ${isSel?'selected':''} ${isToday?'today':''}" data-day="${d}">${faNum(d)}</button>`;
     }
-    return `<div class="cal-header">
-      <button type="button" data-cal-nav="-1">‹</button>
+    body.innerHTML=`<div class="cal-header">
+      <button type="button" data-nav="-1">‹</button>
       <div><b>${MONTHS[jm-1]}</b>${faNum(jy)}</div>
-      <button type="button" data-cal-nav="1">›</button>
+      <button type="button" data-nav="1">›</button>
     </div>
     <div class="cal-week">${WEEK.map(w=>`<div>${w}</div>`).join('')}</div>
     <div class="cal-grid">${cells}</div>`;
-  };
-  const update=()=>{
-    const body=$('#calBody');if(!body)return;
-    body.innerHTML=render();
-    $$('[data-cal-nav]',body).forEach(b=>b.onclick=()=>{
-      const n=+b.dataset.calNav;
+    body.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{
+      const n=+b.dataset.nav;
       if(n<0){jm--;if(jm<1){jm=12;jy--}}else{jm++;if(jm>12){jm=1;jy++}}
-      update();
+      render();
     });
-    $$('[data-day]',body).forEach(b=>b.onclick=()=>{
+    body.querySelectorAll('[data-day]').forEach(b=>b.onclick=()=>{
       const d=+b.dataset.day;
-      closeModal();
+      closeP();
       callback(jStrFromParts(jy,jm,d));
     });
   };
-  openModal(`<h2>انتخاب تاریخ</h2><div id="calBody"></div>
-    <div class="form-actions single" style="margin-top:16px">
-      <button type="button" class="btn" data-close>انصراف</button>
-    </div>`);
-  update();
+  render();
+  overlay.querySelector('[data-cancel]').onclick=closeP;
+  overlay.addEventListener('click',e=>{if(e.target===overlay)closeP()});
 }
+
 function dateField(name,value,label){
   return `<label>${label}
     <div class="date-picker-input" data-date-field="${name}">
@@ -423,7 +455,7 @@ function dateField(name,value,label){
   </label>`;
 }
 
-/* ===== Farmer form ===== */
+/* ===== Forms ===== */
 function openFarmerForm(id=null){
   const isEdit=id!=null;
   const f=isEdit?qOne('SELECT * FROM farmers WHERE id=?',[id]):null;
@@ -448,7 +480,6 @@ function openFarmerForm(id=null){
   });
 }
 
-/* ===== House form ===== */
 function openHouseForm(id=null,prefarmer=null){
   const isEdit=id!=null;
   const h=isEdit?qOne('SELECT * FROM houses WHERE id=?',[id]):null;
@@ -500,7 +531,6 @@ function openHouseForm(id=null,prefarmer=null){
     if(isEdit){
       run(`UPDATE houses SET farmer_id=?,name=?,address=?,capacity=?,owner_name=?,tenant_name=?,tariff_type=?,initial_debt=?,contract_start=?,contract_end=?,placement_date=?,loading_date=?,active=? WHERE id=?`,
         [d.farmer_id,d.name,d.address,d.capacity,d.owner_name,d.tenant_name,d.tariff_type,d.initial_debt,d.contract_start,d.contract_end,d.placement_date,d.loading_date,d.active,id]);
-      // update initial_debt transaction
       const existing=qOne(`SELECT id FROM transactions WHERE house_id=? AND type='initial_debt'`,[id]);
       if(d.initial_debt>0){
         if(existing)run('UPDATE transactions SET amount=?,farmer_id=? WHERE id=?',[d.initial_debt,d.farmer_id,existing.id]);
@@ -528,7 +558,6 @@ function openHouseForm(id=null,prefarmer=null){
   });
 }
 
-/* ===== Farmer detail ===== */
 function openFarmerDetail(id){
   const f=qOne('SELECT * FROM farmers WHERE id=?',[id]);
   if(!f)return;
@@ -561,7 +590,6 @@ function openFarmerDetail(id){
     </div>`);
 }
 
-/* ===== House detail ===== */
 function openHouseDetail(id){
   const h=qOne('SELECT h.*,f.name AS farmer_name FROM houses h JOIN farmers f ON f.id=h.farmer_id WHERE h.id=?',[id]);
   if(!h)return;
@@ -570,48 +598,45 @@ function openHouseDetail(id){
   const bal=houseBalance(id);
   const activeCycle=cycles.find(c=>c.active===1)||cycles[0];
   const age=activeCycle?computeAgeDays(activeCycle.entry_dates):null;
-  return (function(){
-    openModal(`<h2>${esc(h.name)}</h2>
-      <div class="modal-sub">${esc(h.farmer_name)}</div>
-      <div class="detail-balance ${bal<0?'neg':bal===0?'zero':''}">
-        <span class="label">مانده این سالن</span>
-        <span class="amount">${faNum(Math.abs(bal))} تومان</span>
-        <span class="tag">${bal>0?'بدهکار':bal<0?'بستانکار':'تسویه'}</span>
-      </div>
-      <div class="kv"><span>ظرفیت</span><span>${faNum(h.capacity)} قطعه</span></div>
-      <div class="kv"><span>نوع تعرفه</span><span>${TARIFF_LABELS[h.tariff_type]} (${faNum(getCurrentTariff(h.tariff_type))} ت/سر)</span></div>
-      ${h.address?`<div class="kv"><span>آدرس</span><span>${esc(h.address)}</span></div>`:''}
-      ${h.owner_name?`<div class="kv"><span>مالک</span><span>${esc(h.owner_name)}</span></div>`:''}
-      ${h.tenant_name?`<div class="kv"><span>مستاجر</span><span>${esc(h.tenant_name)}</span></div>`:''}
-      ${h.contract_start?`<div class="kv"><span>شروع قرارداد</span><span>${formatDateFa(h.contract_start)}</span></div>`:''}
-      ${h.contract_end?`<div class="kv"><span>پایان قرارداد</span><span>${formatDateFa(h.contract_end)}</span></div>`:''}
-      <div class="kv"><span>وضعیت</span><span><span class="badge ${h.active?'active':'inactive'}">${h.active?'فعال':'خاتمه'}</span></span></div>
-      ${age!==null?`<div class="kv"><span>سن جوجه</span><span><span class="age-badge">${faNum(age)} روز</span></span></div>`:''}
-      <h3>دوره پرورش</h3>
-      ${activeCycle?`
-        <div class="kv"><span>تعداد جوجه</span><span>${faNum(activeCycle.chick_count)}</span></div>
-        ${activeCycle.entry_dates?`<div class="kv"><span>تاریخ ورود</span><span>${JSON.parse(activeCycle.entry_dates||'[]').map(formatDateFa).join(' , ')||'—'}</span></div>`:''}
-        ${activeCycle.load_start_date?`<div class="kv"><span>شروع بارگیری</span><span>${formatDateFa(activeCycle.load_start_date)}</span></div>`:''}
-        ${activeCycle.load_end_date?`<div class="kv"><span>پایان بارگیری</span><span>${formatDateFa(activeCycle.load_end_date)}</span></div>`:''}
-        ${activeCycle.cycle_end_date?`<div class="kv"><span>خاتمه دوره</span><span>${formatDateFa(activeCycle.cycle_end_date)}</span></div>`:''}
-        ${activeCycle.system_cost?`<div class="kv"><span>هزینه سیستم</span><span>${faNum(activeCycle.system_cost)} تومان</span></div>`:''}
-        ${activeCycle.mortality_enabled?`<div class="kv"><span>تلفات</span><span>${faNum(activeCycle.mortality_count)} قطعه</span></div>`:''}
-        ${activeCycle.vaccine_enabled?`<div class="kv"><span>واکسن</span><span>انجام شده</span></div>`:''}
-        ${activeCycle.diseases?`<div class="kv"><span>بیماری</span><span>${esc(activeCycle.diseases)}</span></div>`:''}
-        <button type="button" class="btn small" style="margin-top:8px;width:100%" data-action="edit-cycle" data-id="${activeCycle.id}">✏️ ویرایش دوره</button>
-      `:'<div class="hint" style="text-align:center;padding:8px">دوره‌ای ثبت نشده</div>'}
-      <button type="button" class="btn small" style="margin-top:6px;width:100%" data-action="add-cycle" data-id="${h.id}">+ افزودن دوره جدید</button>
-      <h3>تراکنش‌ها</h3>
-      <div class="mini-list">${txs.length?txs.map(txRow).join(''):'<div class="empty">تراکنشی نیست</div>'}</div>
-      <div class="form-actions" style="grid-template-columns:1fr 1fr 1fr">
-        <button type="button" class="btn" data-close>بستن</button>
-        <button type="button" class="btn danger" data-action="delete-house" data-id="${h.id}">حذف</button>
-        <button type="button" class="btn primary" data-action="edit-house" data-id="${h.id}">ویرایش</button>
-      </div>`);
-  })();
+  openModal(`<h2>${esc(h.name)}</h2>
+    <div class="modal-sub">${esc(h.farmer_name)}</div>
+    <div class="detail-balance ${bal<0?'neg':bal===0?'zero':''}">
+      <span class="label">مانده این سالن</span>
+      <span class="amount">${faNum(Math.abs(bal))} تومان</span>
+      <span class="tag">${bal>0?'بدهکار':bal<0?'بستانکار':'تسویه'}</span>
+    </div>
+    <div class="kv"><span>ظرفیت</span><span>${faNum(h.capacity)} قطعه</span></div>
+    <div class="kv"><span>نوع تعرفه</span><span>${TARIFF_LABELS[h.tariff_type]} (${faNum(getCurrentTariff(h.tariff_type))} ت/سر)</span></div>
+    ${h.address?`<div class="kv"><span>آدرس</span><span>${esc(h.address)}</span></div>`:''}
+    ${h.owner_name?`<div class="kv"><span>مالک</span><span>${esc(h.owner_name)}</span></div>`:''}
+    ${h.tenant_name?`<div class="kv"><span>مستاجر</span><span>${esc(h.tenant_name)}</span></div>`:''}
+    ${h.contract_start?`<div class="kv"><span>شروع قرارداد</span><span>${formatDateFa(h.contract_start)}</span></div>`:''}
+    ${h.contract_end?`<div class="kv"><span>پایان قرارداد</span><span>${formatDateFa(h.contract_end)}</span></div>`:''}
+    <div class="kv"><span>وضعیت</span><span><span class="badge ${h.active?'active':'inactive'}">${h.active?'فعال':'خاتمه'}</span></span></div>
+    ${age!==null?`<div class="kv"><span>سن جوجه</span><span><span class="age-badge">${faNum(age)} روز</span></span></div>`:''}
+    <h3>دوره پرورش</h3>
+    ${activeCycle?`
+      <div class="kv"><span>تعداد جوجه</span><span>${faNum(activeCycle.chick_count)}</span></div>
+      ${activeCycle.entry_dates?`<div class="kv"><span>تاریخ ورود</span><span>${JSON.parse(activeCycle.entry_dates||'[]').map(formatDateFa).join(' , ')||'—'}</span></div>`:''}
+      ${activeCycle.load_start_date?`<div class="kv"><span>شروع بارگیری</span><span>${formatDateFa(activeCycle.load_start_date)}</span></div>`:''}
+      ${activeCycle.load_end_date?`<div class="kv"><span>پایان بارگیری</span><span>${formatDateFa(activeCycle.load_end_date)}</span></div>`:''}
+      ${activeCycle.cycle_end_date?`<div class="kv"><span>خاتمه دوره</span><span>${formatDateFa(activeCycle.cycle_end_date)}</span></div>`:''}
+      ${activeCycle.system_cost?`<div class="kv"><span>هزینه سیستم</span><span>${faNum(activeCycle.system_cost)} تومان</span></div>`:''}
+      ${activeCycle.mortality_enabled?`<div class="kv"><span>تلفات</span><span>${faNum(activeCycle.mortality_count)} قطعه</span></div>`:''}
+      ${activeCycle.vaccine_enabled?`<div class="kv"><span>واکسن</span><span>انجام شده</span></div>`:''}
+      ${activeCycle.diseases?`<div class="kv"><span>بیماری</span><span>${esc(activeCycle.diseases)}</span></div>`:''}
+      <button type="button" class="btn small" style="margin-top:8px;width:100%" data-action="edit-cycle" data-id="${activeCycle.id}">✏️ ویرایش دوره</button>
+    `:'<div class="hint" style="text-align:center;padding:8px">دوره‌ای ثبت نشده</div>'}
+    <button type="button" class="btn small" style="margin-top:6px;width:100%" data-action="add-cycle" data-id="${h.id}">+ افزودن دوره جدید</button>
+    <h3>تراکنش‌ها</h3>
+    <div class="mini-list">${txs.length?txs.map(txRow).join(''):'<div class="empty">تراکنشی نیست</div>'}</div>
+    <div class="form-actions" style="grid-template-columns:1fr 1fr 1fr">
+      <button type="button" class="btn" data-close>بستن</button>
+      <button type="button" class="btn danger" data-action="delete-house" data-id="${h.id}">حذف</button>
+      <button type="button" class="btn primary" data-action="edit-house" data-id="${h.id}">ویرایش</button>
+    </div>`);
 }
 
-/* ===== Cycle form ===== */
 function openCycleForm(houseId,cycleId=null){
   const c=cycleId?qOne('SELECT * FROM cycles WHERE id=?',[cycleId]):null;
   const entryArr=c?JSON.parse(c.entry_dates||'[]'):[];
@@ -644,30 +669,39 @@ function openCycleForm(houseId,cycleId=null){
         <button type="submit" class="btn primary">${c?'ذخیره':'افزودن'}</button>
       </div>
     </form>`);
+
   const renderChips=()=>{
     const hid=$('input[name="entry_dates"]');
+    if(!hid)return;
     const arr=JSON.parse(hid.value||'[]');
-    $('#entryChips').innerHTML=arr.map((d,i)=>`<span class="chip-date">${formatDateFa(d)}<button type="button" data-rm="${i}">×</button></span>`).join('');
-    $$('[data-rm]').forEach(b=>b.onclick=()=>{
-      const idx=+b.dataset.rm;arr.splice(idx,1);hid.value=JSON.stringify(arr);renderChips();
+    const cont=$('#entryChips');
+    if(!cont)return;
+    cont.innerHTML=arr.map((d,i)=>`<span class="chip-date">${formatDateFa(d)}<button type="button" data-rm="${i}">×</button></span>`).join('');
+    cont.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{
+      const idx=+b.dataset.rm;
+      const a=JSON.parse(hid.value||'[]');
+      a.splice(idx,1);
+      hid.value=JSON.stringify(a);
+      renderChips();
     });
   };
   renderChips();
-  $('#addEntryBtn').onclick=()=>{
+
+  $('#addEntryBtn').onclick=e=>{
+    e.preventDefault();
+    const hid=$('input[name="entry_dates"]');
     pickDate('',(d)=>{
-      const hid=$('input[name="entry_dates"]');
       const arr=JSON.parse(hid.value||'[]');
-      arr.push(d);hid.value=JSON.stringify(arr);
+      arr.push(d);
+      hid.value=JSON.stringify(arr);
       renderChips();
-      // re-open modal (since pickDate closes it)
-      openCycleForm(houseId,cycleId);
-      // restore form state - tricky, we lose it
     });
   };
-  // Simpler approach: use event delegation for addEntryBtn
+
   $('#mortToggle').onchange=e=>{
     $('#mortField').style.display=e.target.checked?'block':'none';
   };
+
   $('#cycleForm').addEventListener('submit',e=>{
     e.preventDefault();
     const fd=new FormData(e.target);
@@ -688,7 +722,6 @@ function openCycleForm(houseId,cycleId=null){
     if(cycleId){
       run(`UPDATE cycles SET entry_dates=?,chick_count=?,system_cost=?,mortality_enabled=?,mortality_count=?,vaccine_enabled=?,diseases=?,load_start_date=?,load_end_date=?,cycle_end_date=? WHERE id=?`,
         [d.entry_dates,d.chick_count,d.system_cost,d.mortality_enabled,d.mortality_count,d.vaccine_enabled,d.diseases,d.load_start_date,d.load_end_date,d.cycle_end_date,cycleId]);
-      // sync system_cost transaction
       const h=qOne('SELECT farmer_id FROM houses WHERE id=?',[hidHouse]);
       const existing=qOne(`SELECT id FROM transactions WHERE cycle_id=? AND type='system_cost'`,[cycleId]);
       if(d.system_cost>0){
@@ -698,7 +731,6 @@ function openCycleForm(houseId,cycleId=null){
           [h.farmer_id,hidHouse,cycleId,'system_cost',d.system_cost,'هزینه سیستم',jStr(j),gregStr(j)]);
       }else if(existing)run('DELETE FROM transactions WHERE id=?',[existing.id]);
     }else{
-      // mark previous cycle inactive
       run('UPDATE cycles SET active=0 WHERE house_id=?',[hidHouse]);
       db.run(`INSERT INTO cycles(house_id,entry_dates,chick_count,system_cost,mortality_enabled,mortality_count,vaccine_enabled,diseases,load_start_date,load_end_date,cycle_end_date,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`,
         [hidHouse,d.entry_dates,d.chick_count,d.system_cost,d.mortality_enabled,d.mortality_count,d.vaccine_enabled,d.diseases,d.load_start_date,d.load_end_date,d.cycle_end_date]);
@@ -715,30 +747,6 @@ function openCycleForm(houseId,cycleId=null){
   });
 }
 
-// Override entry date add with delegated handler
-document.addEventListener('click',e=>{
-  if(e.target.id==='addEntryBtn'){
-    e.preventDefault();
-    const hid=$('input[name="entry_dates"]');
-    pickDate('',(d)=>{
-      const arr=JSON.parse(hid.value||'[]');
-      arr.push(d);hid.value=JSON.stringify(arr);
-      // Re-render chips directly without closing modal
-      const chipsEl=$('#entryChips');
-      if(chipsEl){
-        chipsEl.innerHTML=arr.map((dd,i)=>`<span class="chip-date">${formatDateFa(dd)}<button type="button" data-rm="${i}">×</button></span>`).join('');
-        $$('[data-rm]').forEach(b=>b.onclick=()=>{
-          const idx=+b.dataset.rm;arr.splice(idx,1);hid.value=JSON.stringify(arr);
-          chipsEl.innerHTML=arr.map((dd,j)=>`<span class="chip-date">${formatDateFa(dd)}<button type="button" data-rm="${j}">×</button></span>`).join('');
-          $$('[data-rm]').forEach(bb=>bb.onclick=()=>{const i2=+bb.dataset.rm;arr.splice(i2,1);hid.value=JSON.stringify(arr);bb.parentElement.remove()});
-        });
-      }
-    });
-  }
-  if(e.target.classList.contains('cal-day')) return; // handled inline
-});
-
-/* ===== Transaction form ===== */
 function openTxForm(){
   const farmers=qAll('SELECT id,name FROM farmers ORDER BY name');
   if(!farmers.length){toast('ابتدا مرغدار اضافه کنید');openFarmerForm();return}
@@ -806,7 +814,6 @@ function openTxDetail(id){
     </div>`);
 }
 
-/* ===== Tariff form ===== */
 function openTariffForm(type){
   const current=getCurrentTariff(type);
   const hasHistory=!!qOne('SELECT id FROM tariff_history WHERE tariff_type=?',[type]);
@@ -841,7 +848,6 @@ function openTariffForm(type){
   });
 }
 
-/* ===== Backup / Restore / CSV ===== */
 async function downloadBackup(){
   const blob=new Blob([db.export()],{type:'application/x-sqlite3'});
   const url=URL.createObjectURL(blob);
@@ -859,7 +865,9 @@ async function handleRestore(file){
     const nd=new SQL.Database(bytes);
     nd.exec('SELECT COUNT(*) FROM farmers');
     try{db.close()}catch(_){}
-    db=nd;db.run(SCHEMA);
+    db=nd;
+    migrateSchema(); // اعمال تغییرات روی فایل بازیابی شده
+    db.run(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)`);
     await persistNow();
     render();toast('بازیابی شد');
   }catch(e){console.error(e);toast('فایل معتبر نیست')}
@@ -878,13 +886,11 @@ function downloadCSV(){
   toast('CSV دانلود شد');
 }
 
-/* ===== Toast ===== */
 function toast(msg){
   const el=$('#toast');el.textContent=msg;el.classList.add('show');
   clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),2400);
 }
 
-/* ===== Setup / reconnect modals ===== */
 function showSetupModal(){
   openModal(`<h2>📁 محل ذخیره‌سازی</h2>
     <p class="hint">برای اینکه داده‌ها با پاک شدن مرورگر از بین نروند، یک پوشه انتخاب کنید. فایل <b>hesabyar.sqlite</b> در آن ساخته می‌شود.</p>
@@ -909,7 +915,15 @@ async function handlePickFolder(){
     const existing=await loadFromFile();
     if(existing&&existing.byteLength>0){
       if(confirm('فایلی از قبل وجود دارد. داده‌های آن بارگذاری شود؟')){
-        try{try{db.close()}catch(_){}db=new SQL.Database(existing);db.run(SCHEMA)}catch(err){toast('فایل نامعتبر');db=new SQL.Database();db.run(SCHEMA)}
+        try{
+          try{db.close()}catch(_){}
+          db=new SQL.Database(existing);
+          migrateSchema();
+          db.run(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)`);
+        }catch(err){
+          toast('فایل نامعتبر');db=new SQL.Database();
+          db.run(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)`);
+        }
       }
     }
     await persistNow();
@@ -918,10 +932,8 @@ async function handlePickFolder(){
   }catch(e){console.error(e);toast('خطا در ذخیره')}
 }
 
-/* ===== Global delegation ===== */
 function setupDelegation(){
   document.addEventListener('click',async e=>{
-    // date field
     const df=e.target.closest('[data-date-field]');
     if(df){
       const name=df.dataset.dateField;
@@ -998,7 +1010,6 @@ function setupDelegation(){
   });
 }
 
-/* ===== Boot ===== */
 async function boot(){
   try{
     if('showDirectoryPicker' in window){
